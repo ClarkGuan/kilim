@@ -10,6 +10,7 @@ import org.objectweb.asm.Opcodes;
 public interface Constants extends Opcodes {
     
     String KILIM_VERSION    = "1.0";
+    int    KILIM_ASM        = ASM7;
     
     // Type descriptors
     String D_BOOLEAN        = "Z";
@@ -42,6 +43,7 @@ public interface Constants extends Opcodes {
     String D_STATE          = "Lkilim/State;";
     String D_TASK           = "Lkilim/Task;";
     String D_PAUSABLE       = "Lkilim/Pausable;";
+    String D_FIBER_LAST_ARG   = D_FIBER + ')'; // Last argument in a method descriptor
 
     String THROWABLE_CLASS  = "java/lang/Throwable";
     String FIBER_CLASS      = "kilim/Fiber";
@@ -64,4 +66,12 @@ public interface Constants extends Opcodes {
     int    DSTORE_0         = 71;
     int    ASTORE_0         = 75;
     int    LDC2_W           = 20;
+
+    String SAM_SHIM_PREFIX = "$shim$";
+
+    public static class Util {
+        public static boolean isSamShim(String name) {
+            return name.startsWith(SAM_SHIM_PREFIX);
+        }
+    }
 }

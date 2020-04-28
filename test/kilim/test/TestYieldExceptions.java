@@ -7,6 +7,7 @@
 package kilim.test;
 
 import junit.framework.TestCase;
+import kilim.test.ex.ExCatch;
 
 public class TestYieldExceptions extends TestCase {
     /*
@@ -39,9 +40,38 @@ public class TestYieldExceptions extends TestCase {
     public void testTryCatchFinally() throws Exception {
         TestYield.runTask(new kilim.test.ex.ExCatch(3));
     }
+
+    public void testTryThrow() throws Exception {
+        for (int ii=0; ii < 16; ii++)
+            TestYield.runTask(new kilim.test.ex.ExCatch.TryThrow(ii));
+    }
     
+    public void testTryThrowVars() throws Exception {
+        for (int ii=0; ii < 16; ii++)
+            TestYield.runTask(new kilim.test.ex.ExCatch.TryThrowVars(ii));
+    }
     
     public void testPausableBlocksBeforeCatch() throws Exception {
         TestYield.runTask(new kilim.test.ex.ExCatch(4));
+    }
+
+    public void testRestoreBeforeDefine() throws Exception {
+        TestYield.runTask(new kilim.test.ex.ExCatch(5));
+    }
+    public void testWhileCatch() throws Exception {
+        TestYield.runTask(new kilim.test.ex.ExCatch(6));
+    }
+    public void testRestoreArgument() throws Exception {
+        TestYield.runTask(new kilim.test.ex.ExCatch(7));
+    }
+    public void testCorrectException() throws Exception {
+        TestYield.runTask(new kilim.test.ex.ExCatch(8));
+    }
+
+    public void testPureCatch()  throws Exception {
+        TestYield.runPure(new kilim.test.ex.ExCatch.Pure());
+    }
+    public void testPausableInvokeCatch() throws Exception {
+        TestYield.runTask(new kilim.test.ex.ExCatch(9));
     }
 }

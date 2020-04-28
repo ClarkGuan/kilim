@@ -9,11 +9,12 @@ import static kilim.Constants.THROWABLE_CLASS;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 
 /**
  * Representation for a catch handler. 
  */
-public class Handler implements Comparable<Handler> {
+public class Handler {
     /**
      * Source offset in method's instruction list
      */
@@ -34,7 +35,14 @@ public class Handler implements Comparable<Handler> {
      */
     public BasicBlock catchBB;
 
-    public Handler(int aFrom, int aTo, String aType, BasicBlock aCatchBB) {
+    /** the position of the corresponding entry in the unwoven exception table */    
+    public int pos;
+
+    public Handler(int aFrom, int aTo, Handler h) {
+        this(aFrom,aTo,h.type,h.catchBB,h.pos);
+    }
+    
+    public Handler(int aFrom,int aTo,String aType,BasicBlock aCatchBB,int pos) {
         from = aFrom;
         to = aTo;
         if (aType == null) {
@@ -44,39 +52,48 @@ public class Handler implements Comparable<Handler> {
         }
         type = aType;
         catchBB = aCatchBB;
+        this.pos = pos;
     }
     
-    public int compareTo(Handler h) {
-        int c = this.type.compareTo(h.type);
-        if (c != 0) return c;
-        
-        c = this.catchBB.compareTo(h.catchBB);
-        if (c != 0) return c;
-
+    private int comparePos(Handler h) {
         return from < h.from ? -1 : (from == h.from) ? 0 : 1;
     }
     
-    public static ArrayList<Handler> consolidate( ArrayList<Handler> list) {
-        Collections.sort(list);
+    public static ArrayList<Handler> consolidate(ArrayList<Handler> list) {
         ArrayList<Handler> newList = new ArrayList<Handler>(list.size());
-        Handler cur = null;
-        for (Handler h: list) {
-            if (cur == null) {
-                cur = h;
-                newList.add(cur);
-                continue;
-            } 
-            // Two options here. Either h is contiguous with c or it isn't. Contiguous
-            // means that it has to be the same type and the same catchBB and  
-            // from == to+1
-            if (cur.type.equals(h.type) && (cur.catchBB == h.catchBB) && (h.from == cur.to + 1)) {
-                cur.to = h.to;
-            } else {
-                cur = h;
-                newList.add(cur);
+        outer:
+        for (Handler c : list) {
+            for (Handler h : newList) {
+                // Two options here. Either h is contiguous with c or it isn't. Contiguous
+                // means that it has to be the same type and the same catchBB and  
+                // from == to+1
+                if (c.type.equals(h.type) & c.catchBB==h.catchBB) {
+                    if      (h.from==c.to+1) { h.from = c.from; continue outer; }
+                    else if (c.from==h.to+1) { h.to   = c.to; continue outer; }
+                }
             }
+            newList.add(c);
         }
+        Collections.sort(newList,resort);
         return newList;
     }
 
+    private static Resort resort = new Resort();
+    private static class Resort implements Comparator<Handler> {
+        public int compare(Handler o1,Handler o2) {
+            return o1.pos < o2.pos ? -1 : o1.pos==o2.pos ? 0:1;
+        }
+    }
+    
+    
+    
+    /** return a Comparator that orders the handlers by start position */
+    public static Comparator<Handler> startComparator() { return comp; }
+    private static Comp comp = new Comp();
+    private static class Comp implements Comparator<Handler> {
+        public int compare(Handler o1,Handler o2) {
+            return o1.comparePos(o2);
+        }
+    }
+    
 }

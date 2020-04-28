@@ -5,7 +5,7 @@
  */
 
 package kilim.analysis;
-import static kilim.Constants.D_FIBER;
+import static kilim.Constants.D_FIBER_LAST_ARG;
 import static kilim.Constants.D_INT;
 import static kilim.Constants.D_VOID;
 import static kilim.Constants.FIBER_CLASS;
@@ -23,15 +23,23 @@ import static org.objectweb.asm.Opcodes.RETURN;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.ListIterator;
 
 import kilim.Constants;
+import kilim.mirrors.Detector;
 
 import org.objectweb.asm.AnnotationVisitor;
 import org.objectweb.asm.Attribute;
 import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
+import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.AnnotationNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.LabelNode;
+import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.LocalVariableNode;
 import org.objectweb.asm.tree.LookupSwitchInsnNode;
 import org.objectweb.asm.tree.TableSwitchInsnNode;
@@ -53,6 +61,8 @@ public class MethodWeaver {
     private int                   maxVars;
 
     private int                   maxStack;
+    
+    private boolean               isSAM;
 
     /**
      * The last parameter to a pausable method is a Fiber ref. The rest of the
@@ -65,13 +75,17 @@ public class MethodWeaver {
     private int                   numWordsInSig;
     private ArrayList<CallWeaver> callWeavers = new ArrayList<CallWeaver>(5);
 
-    MethodWeaver(ClassWeaver cw, MethodFlow mf) {
+    private Detector detector;
+
+    MethodWeaver(ClassWeaver cw, Detector detector, MethodFlow mf, boolean isSAM) {
+        this.detector = detector;
         this.classWeaver = cw;
         this.methodFlow = mf;
         isPausable = mf.isPausable();
         fiberVar =  methodFlow.maxLocals;
         maxVars = fiberVar + 1;
-        maxStack = methodFlow.maxStack + 1; // plus Fiber 
+        maxStack = methodFlow.maxStack + 1; // plus Fiber
+        this.isSAM = isSAM;
         if (!mf.isAbstract()) {
             createCallWeavers();
         }
@@ -83,21 +97,25 @@ public class MethodWeaver {
         String[] exceptions = ClassWeaver.toStringArray(mf.exceptions);
         String desc = mf.desc;
         String sig = mf.signature;
+        int access = mf.access;
         if (mf.isPausable()) {
-            desc = desc.replace(")", D_FIBER + ')');
-            if (sig != null)
-                sig = sig.replace(")", D_FIBER + ')');
+            access &= ~Opcodes.ACC_VARARGS;
+            if (!isSAM) {
+                desc = desc.replace(")", D_FIBER_LAST_ARG);
+                if (sig != null)
+                    sig = sig.replace(")", D_FIBER_LAST_ARG);
+            }
         }
-        MethodVisitor mv = cv.visitMethod(mf.access, mf.name, desc, sig, exceptions);
+        MethodVisitor mv = cv.visitMethod(access, mf.name, desc, sig, exceptions);
 
         if (!mf.isAbstract()) {
-            if (mf.isPausable()) {
+            if (mf.needsWeaving()) {
                 accept(mv);
             } else {
                 mf.accept(mv);
             }
         } else {
-        	mv.visitEnd();
+        	mf.accept(mv);
         }
     }
     
@@ -156,7 +174,7 @@ public class MethodWeaver {
             mv.visitAttribute((Attribute) mf.attrs.get(i));
         }
     }
-
+    
     private void visitCode(MethodVisitor mv) {
         mv.visitCode();
         methodFlow.resetLabels();
@@ -181,6 +199,9 @@ public class MethodWeaver {
         MethodFlow mf = methodFlow;
         genPrelude(mv);
         BasicBlock lastBB = null;
+        boolean dsl = dslName.equals(mf.name) & dslDesc.equals(mf.desc);
+        if (dsl)
+            preweaveDeserializeLambda();
         for (BasicBlock bb : mf.getBasicBlocks()) {
             int from = bb.startPos;
             
@@ -200,7 +221,12 @@ public class MethodWeaver {
                 if (l != null) {
                     l.accept(mv);
                 }
-                bb.getInstruction(i).accept(mv);
+                AbstractInsnNode ain = bb.getInstruction(i);
+                if (ain.getOpcode() == Constants.INVOKEDYNAMIC) {
+                    transformIndyBootstrap(mv, ain);
+                } else {
+                    ain.accept(mv);
+                }
             }
             lastBB = bb;
         }
@@ -211,6 +237,79 @@ public class MethodWeaver {
             }
         }
     }
+    static String dslName = "$deserializeLambda$";
+    static String dslDesc = "(Ljava/lang/invoke/SerializedLambda;)Ljava/lang/Object;";
+    private static String addFiber(String type) {
+        return type.replace(")", Constants.D_FIBER_LAST_ARG);
+    }
+
+    /** 
+     * at least with openjdk 8-11, deserializing lambdas checks the signature or the target.
+     * FIXME: this method is implementation dependent (probably unfixable, but want this line to show in a grep)
+     */
+    public void preweaveDeserializeLambda() {
+        int maxState = 22;
+        int state = 0;
+        String cname = null;
+        String mname = null;
+
+        int num = methodFlow.instructions.size(); 
+        for (int ii=0; ii < num; ii++) {
+            AbstractInsnNode node = methodFlow.instructions.get(ii);
+
+            int opcode = node.getOpcode();
+            if (opcode != Opcodes.LDC) {
+                if (opcode==Opcodes.INVOKEDYNAMIC || opcode==Opcodes.LOOKUPSWITCH)
+                    state = 0;
+                continue;
+            }
+            LdcInsnNode ldc = (LdcInsnNode) node;
+
+
+            switch (state) {
+                case 0: cname = (String) ldc.cst; break;
+                case 1: mname = (String) ldc.cst; break;
+                case 2:
+                    String mdesc = (String) ldc.cst;
+                    if (detector.getPausableStatus(cname,mname,mdesc)==Detector.PAUSABLE_METHOD_FOUND)
+                        ldc.cst = addFiber(mdesc);
+                    else
+                        state = maxState;
+                    break;
+
+
+                case 4: ldc.cst = addFiber((String) ldc.cst); break;
+            }
+            state++;
+        }
+    }
+
+    private void transformIndyBootstrap(MethodVisitor mv, AbstractInsnNode ain) {
+        InvokeDynamicInsnNode indy = (InvokeDynamicInsnNode)ain;
+        Object[]bsmArgs = indy.bsmArgs;
+        // Is it a lambda conversion
+        if (indy.bsm.getOwner().equals("java/lang/invoke/LambdaMetafactory")) {
+            Handle lambdaBody = (Handle)bsmArgs[1];
+            String desc = lambdaBody.getDesc();
+            if (detector.isPausable(lambdaBody.getOwner(), lambdaBody.getName(), desc)) {
+                bsmArgs[0] = addFiberType((Type)bsmArgs[0]);
+                bsmArgs[1] = new Handle(lambdaBody.getTag(), 
+                                        lambdaBody.getOwner(), 
+                                        lambdaBody.getName(), 
+                                        desc.replace(")", D_FIBER_LAST_ARG),
+                                        lambdaBody.isInterface());
+                bsmArgs[2] = addFiberType((Type)bsmArgs[2]);
+            }
+        }
+        ain.accept(mv);
+    }
+
+    private static Type addFiberType(Type type) {
+        String typeDesc = type.toString().replace(")", D_FIBER_LAST_ARG);
+        return Type.getType(typeDesc);
+    }
+
+
 
     private List<CallWeaver> getCallsUnderCatchBlock(BasicBlock catchBB) {
         List<CallWeaver> cwList = null; // create it lazily
@@ -297,7 +396,7 @@ public class MethodWeaver {
             if (!bb.isPausable() || bb.startFrame==null) continue;
             // No prelude needed for Task.getCurrentTask(). 
             if (bb.isGetCurrentTask()) continue; 
-            CallWeaver cw = new CallWeaver(this, bb);
+            CallWeaver cw = new CallWeaver(this, detector, bb);
             callWeavers.add(cw);
         }
     }
@@ -321,7 +420,7 @@ public class MethodWeaver {
      * </pre>
      */
     private void genPrelude(MethodVisitor mv) {
-        assert isPausable : "MethodWeaver.genPrelude called for nonPausable method";
+        if (!methodFlow.isPausable()) return;
         if (callWeavers.size() == 0 && (!hasGetCurrentTask())) {
             // Method has been marked pausable, but does not call any pausable methods, nor Task.getCurrentTask.  
             // Prelude is not needed at all.
@@ -364,7 +463,7 @@ public class MethodWeaver {
         
         errLabel.accept(mv);
         mv.visitVarInsn(ALOAD, getFiberVar());
-        mv.visitMethodInsn(INVOKEVIRTUAL, FIBER_CLASS, "wrongPC", "()V");
+        mv.visitMethodInsn(INVOKEVIRTUAL, FIBER_CLASS, "wrongPC", "()V", false);
         // Generate pass through down code, one for each pausable method
         // invocation
         int last = callWeavers.size() - 1;
@@ -430,7 +529,7 @@ public class MethodWeaver {
         bb.startLabel.accept(mv);
         LabelNode resumeLabel = new LabelNode();
         VMType.loadVar(mv, VMType.TOBJECT, getFiberVar());
-        mv.visitMethodInsn(INVOKEVIRTUAL, FIBER_CLASS, "upEx", "()I");
+        mv.visitMethodInsn(INVOKEVIRTUAL, FIBER_CLASS, "upEx", "()I", false);
         // fiber.pc is on stack
         LabelNode[] labels = new LabelNode[cwList.size()];
         int[] keys = new int[cwList.size()];
@@ -501,20 +600,23 @@ public class MethodWeaver {
         return classWeaver.createStateClass(valInfoList);
     }
     
-    void makeNotWovenMethod(ClassVisitor cv, MethodFlow mf) {
-        if (classWeaver.isInterface()) {
-             MethodVisitor mv = cv.visitMethod(mf.access, mf.name, mf.desc, 
+    void makeNotWovenMethod(ClassVisitor cv, MethodFlow mf, boolean isSAM) {
+        if (classWeaver.classFlow.isJava7() && classWeaver.isInterface()) {
+            MethodVisitor mv = cv.visitMethod(mf.access, mf.name, mf.desc,
                     mf.signature, ClassWeaver.toStringArray(mf.exceptions));
-             mv.visitEnd();
+            visitAttrs(mv);
+            mv.visitEnd();
         } else {
             // Turn of abstract modifier
             int access = mf.access;
             access &= ~Constants.ACC_ABSTRACT;
-            MethodVisitor mv = cv.visitMethod(access, mf.name, mf.desc, 
+            String desc = isSAM ? mf.desc.replace(")", Constants.D_FIBER_LAST_ARG) : mf.desc;
+            MethodVisitor mv = cv.visitMethod(access, mf.name, desc, 
                     mf.signature, ClassWeaver.toStringArray(mf.exceptions));
             mv.visitCode();
             visitAttrs(mv);
-            mv.visitMethodInsn(INVOKESTATIC, TASK_CLASS, "errNotWoven", "()V");
+            boolean isInterface = classWeaver.isInterface() && !isSAM;
+            mv.visitMethodInsn(INVOKESTATIC, TASK_CLASS, "errNotWoven", "()V", isInterface);
             
             String rdesc = TypeDesc.getReturnTypeDesc(mf.desc);
             // stack size depends on return type, because we want to load
@@ -543,6 +645,14 @@ public class MethodWeaver {
             mv.visitMaxs(stacksize, numlocals);
             mv.visitEnd();
         }
+
+    }
+    ClassWeaver getClassWeaver() {
+        return this.classWeaver;
+    }
+    
+    MethodFlow getMethodFlow() {
+        return this.methodFlow;
     }
 }
 

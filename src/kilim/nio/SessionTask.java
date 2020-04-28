@@ -7,25 +7,18 @@
 package kilim.nio;
 
 import java.io.IOException;
-
-import kilim.Scheduler;
 import kilim.Task;
 
 public class SessionTask extends Task {
-  public EndPoint endpoint;
-  public Scheduler preferredScheduler;
-  
-  public EndPoint getEndPoint() {
-    return endpoint;
-  }
-  
-  public void setEndPoint(EndPoint ep) throws IOException {
-    this.endpoint = ep;
-  }
-  
-  public void close() {
-    if (endpoint != null) {
-      endpoint.close();
+    public EndPoint endpoint;
+
+    public void close() {
+        if (endpoint != null) {
+            IOException ex = endpoint.close2();
+            if (ex != null) Sched.log(getScheduler(),this,ex);
+        }
     }
-  }
+    private static class Sched extends kilim.AffineScheduler {
+        static void log(kilim.Scheduler sched,Object src,Object obj) { logRelay(sched,src,obj); }
+    }
 }
